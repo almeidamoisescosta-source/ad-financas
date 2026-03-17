@@ -957,7 +957,9 @@ window.showConfig = () => {
                 
                 <button class="btn-primary" onclick="testCloudConnection()" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:700; margin-bottom:10px;">⚡ Testar Conexão Agora</button>
                 <button class="btn-primary" onclick="saveCloudConfig()" style="background:#0284c7; color:white; border:none; font-weight:700;">Salvar e Reconectar</button>
-                <button class="btn-primary" onclick="syncAllToCloud()" style="margin-top:10px; background:white; color:#0284c7; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Manual Sync (Local -> Cloud)</button>
+                <div style="height:10px;"></div>
+                <button class="btn-primary" onclick="syncAllToCloud()" style="background:white; color:#0284c7; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Push: Enviar dados deste PC p/ Nuvem</button>
+                <button class="btn-primary" onclick="manualPull()" style="margin-top:10px; background:white; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Pull: Buscar dados da Nuvem p/ este PC</button>
             </div>
             
             <button class="btn-primary" onclick="hideModal()" style="margin-top:25px; background:none; color:var(--text-dim); box-shadow:none; font-weight:600;">Sair das Configs</button>
@@ -984,14 +986,14 @@ window.syncAllToCloud = async () => {
             if (uErr) throw uErr;
         }
         
-        alert("Sincronização concluída com sucesso!");
+        alert("Manual Sync: Envio concluído! Os dados agora estão na nuvem.");
     } catch (e) {
         console.error("Sync All Error:", e);
         let msg = e.message;
         if (e instanceof TypeError && e.message.includes('fetch')) {
             msg = "Erro de Rede: Não foi possível alcançar o servidor Supabase. Verifique se a URL está correta (deve começar com https://) e se você tem internet.";
         }
-        alert("Erro na sincronização: " + msg);
+        alert("Erro no Envio (Push): " + msg);
     }
 };
 
@@ -1085,10 +1087,22 @@ window.pullFromCloud = async () => {
         
         console.log("Cloud Pull Completed.");
         if (currentUser) renderDashboard();
+        return true;
     } catch (e) {
         console.error("Cloud Pull Error:", e);
+        return false;
     }
 };
+
+window.manualPull = async () => {
+    alert("Iniciando busca de novos dados na nuvem...");
+    const success = await pullFromCloud();
+    if (success) {
+        alert("Busca concluída! Se havia dados novos no outro aparelho, eles já apareceram aqui.");
+    } else {
+        alert("Erro ao buscar dados. Verifique sua conexão e se o Supabase está configurado corretamente.");
+    }
+}
 
 
 window.setTheme = (theme) => {
