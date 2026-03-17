@@ -60,6 +60,11 @@ async function initApp() {
         // Init Cloud
         initSupabase();
         
+        // Auto-Pull from Cloud
+        if (supabase) {
+            await pullFromCloud();
+        }
+        
         setupGlobalEvents();
         
         // Apply Theme
@@ -950,6 +955,7 @@ window.showConfig = () => {
                     <label style="color:#0c4a6e; font-weight:600; font-size:0.9rem;">Habilitar Sincronia</label>
                 </div>
                 
+                <button class="btn-primary" onclick="testCloudConnection()" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:700; margin-bottom:10px;">⚡ Testar Conexão Agora</button>
                 <button class="btn-primary" onclick="saveCloudConfig()" style="background:#0284c7; color:white; border:none; font-weight:700;">Salvar e Reconectar</button>
                 <button class="btn-primary" onclick="syncAllToCloud()" style="margin-top:10px; background:white; color:#0284c7; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Manual Sync (Local -> Cloud)</button>
             </div>
@@ -981,17 +987,107 @@ window.syncAllToCloud = async () => {
         alert("Sincronização concluída com sucesso!");
     } catch (e) {
         console.error("Sync All Error:", e);
-        alert("Erro na sincronização: " + e.message);
+        let msg = e.message;
+        if (e instanceof TypeError && e.message.includes('fetch')) {
+            msg = "Erro de Rede: Não foi possível alcançar o servidor Supabase. Verifique se a URL está correta (deve começar com https://) e se você tem internet.";
+        }
+        alert("Erro na sincronização: " + msg);
     }
 };
 
 
 window.saveCloudConfig = () => {
-    localStorage.setItem('sb_url', document.getElementById('cfg-sb-url').value.trim());
-    localStorage.setItem('sb_key', document.getElementById('cfg-sb-key').value.trim());
-    localStorage.setItem('sb_enabled', document.getElementById('cfg-sb-enabled').checked);
-    alert("Configurações salvas! O aplicativo será reiniciado para aplicar as mudanças.");
+    let url = document.getElementById('cfg-sb-url').value.trim();
+    const key = document.getElementById('cfg-sb-key').value.trim();
+    const enabled = document.getElementById('cfg-sb-enabled').checked;
+
+    if (enabled && url) {
+        if (!url.startsWith('https://')) {
+            return alert("A URL do projeto deve começar com https://");
+        }
+        // Remove trailing slash if exists
+        url = url.replace(/\/$/, "");
+    }
+
+    localStorage.setItem('sb_url', url);
+    localStorage.setItem('sb_key', key);
+    localStorage.setItem('sb_enabled', enabled);
+    
+    alert("Configurações salvas! Reiniciando para aplicar...");
     location.reload();
+};
+
+window.testCloudConnection = async () => {
+    const url = document.getElementById('cfg-sb-url').value.trim();
+    const key = document.getElementById('cfg-sb-key').value.trim();
+    
+    if (!url || !key) return alert("Preencha a URL e a Chave para testar.");
+    
+    try {
+        const { createClient } = window.supabase;
+        const testClient = createClient(url, key);
+        // Test query
+        const { error } = await testClient.from('users').select('count', { count: 'exact', head: true });
+        
+        if (error) throw error;
+        alert("✅ Conexão bem sucedida! O sistema conseguiu falar com o Supabase.");
+    } catch (e) {
+        console.error("Test Conn Error:", e);
+        let msg = e.message;
+        if (e instanceof TypeError && e.message.includes('fetch')) {
+            msg = "URL Inválida ou Sem Internet. Verifique se a URL do projeto está correta.";
+        } else if (e.message.includes('401') || e.message.includes('Invalid API key')) {
+            msg = "Chave API Invalida (Anon Key). Verifique se copiou a chave certa.";
+        } else if (e.message.includes('404')) {
+            msg = "Tabela 'users' não encontrada. Verifique se você rodou o código SQL no Supabase.";
+        }
+        alert("❌ Falha na Conexão: " + msg);
+    }
+};
+
+window.pullFromCloud = async () => {
+    if (!supabase) return;
+    console.log("Pulling data from cloud...");
+    try {
+        // 1. Fetch Transactions
+        const { data: cloudTrans, error: tErr } = await supabase.from('transactions').select('*');
+        if (tErr) throw tErr;
+        
+        // 2. Fetch Users
+        const { data: cloudUsers, error: uErr } = await supabase.from('users').select('*');
+        if (uErr) throw uErr;
+
+        // Sync Transactions
+        if (cloudTrans && cloudTrans.length > 0) {
+            cloudTrans.forEach(row => {
+                const exists = alasql("SELECT id FROM transactions WHERE sync_id=?", [row.sync_id])[0];
+                if (exists) {
+                    alasql("UPDATE transactions SET type=?, category=?, description=?, amount=?, date=?, method=?, observation=?, user_id=?, user_name=?, month_ref=? WHERE sync_id=?",
+                        [row.type, row.category, row.description, row.amount, row.date, row.method, row.observation, row.user_id, row.user_name, row.month_ref, row.sync_id]);
+                } else {
+                    alasql("INSERT INTO transactions (type, category, description, amount, date, method, observation, user_id, user_name, month_ref, sync_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        [row.type, row.category, row.description, row.amount, row.date, row.method, row.observation, row.user_id, row.user_name, row.month_ref, row.sync_id]);
+                }
+            });
+        }
+
+        // Sync Users
+        if (cloudUsers && cloudUsers.length > 0) {
+            cloudUsers.forEach(row => {
+                const exists = alasql("SELECT id FROM users WHERE email=?", [row.email])[0];
+                if (exists) {
+                    alasql("UPDATE users SET password=?, name=?, role=? WHERE email=?", [row.password, row.name, row.role, row.email]);
+                } else {
+                    alasql("INSERT INTO users (email, password, name, role) VALUES (?,?,?,?)", [row.email, row.password, row.name, row.role]);
+                }
+            });
+        }
+        
+        console.log("Cloud Pull Completed.");
+        if (currentUser) renderDashboard();
+    } catch (e) {
+        console.error("Cloud Pull Error:", e);
+    }
 };
 
 
