@@ -31,6 +31,7 @@ const CLOUD_CONFIG = {
     key: localStorage.getItem('sb_key') || '',
     enabled: localStorage.getItem('sb_enabled') === 'true'
 };
+let isSyncing = false;
 
 function initSupabase() {
     if (CLOUD_CONFIG.enabled && CLOUD_CONFIG.url && CLOUD_CONFIG.key) {
@@ -38,6 +39,14 @@ function initSupabase() {
             const { createClient } = window.supabase;
             supabase = createClient(CLOUD_CONFIG.url, CLOUD_CONFIG.key);
             console.log("Supabase Cloud Connected.");
+            
+            // Realtime Subscription
+            supabase.channel('custom-all-channel')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, payload => {
+                    console.log('Realtime change:', payload);
+                    handleRealtimeChange(payload);
+                })
+                .subscribe();
         } catch (e) {
             console.error("Supabase Init Error:", e);
         }
@@ -45,8 +54,32 @@ function initSupabase() {
 }
 
 // --- Initialization ---
+function handleUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('sb_url');
+    const key = params.get('sb_key');
+    
+    if (url && key) {
+        localStorage.setItem('sb_url', url);
+        localStorage.setItem('sb_key', key);
+        localStorage.setItem('sb_enabled', 'true');
+        
+        // Update CLOUD_CONFIG immediately
+        CLOUD_CONFIG.url = url;
+        CLOUD_CONFIG.key = key;
+        CLOUD_CONFIG.enabled = true;
+        
+        alert("Configuração automática do Supabase aplicada com sucesso!");
+        
+        // Clean URL without reloading
+        const cleanUrl = window.location.href.split('?')[0].split('#')[0];
+        window.history.pushState({path:cleanUrl},'',cleanUrl);
+    }
+}
+
 async function initApp() {
     try {
+        handleUrlParams();
         console.log("Initializing Alasql...");
         
         // Setup Alasql Persistence
@@ -142,6 +175,7 @@ function setupGlobalEvents() {
                 USER_SESSIONS[currentUser.id] = { name: currentUser.name, lastActive: Date.now() };
                 showPage("main-container");
                 loadTab("dashboard");
+                alert("Bem Vindo ao ADFinança da Assembleia de Deus em Luis Domingues-MA");
             } else {
                 alert("Acesso Negado. Verifique o login e a senha.");
             }
@@ -248,7 +282,9 @@ async function renderDashboard() {
     const currentBal = await getBalance(currentMonth);
 
 
-    const syncStatus = CLOUD_CONFIG.enabled ? (supabase ? '🟢 Nuvem Ativa' : '🔴 Nuvem Offline') : '⚪ Local-only';
+
+    const syncStatus = CLOUD_CONFIG.enabled ? (supabase ? (isSyncing ? '⏳ Sincronizando...' : '🟢 Nuvem Ativa') : '🔴 Nuvem Offline') : '⚪ Local-only';
+
 
     const tab = document.getElementById("tab-dashboard");
     tab.innerHTML = `
@@ -359,13 +395,22 @@ function renderFinancialTab(type) {
 
 
         <div class="info-block">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                <h3>Lançamentos (${currentMonth})</h3>
-                <select id="t-filter" onchange="renderListView('${type}')" style="background:white; color:var(--text-main); border:1px solid #e2e8f0; border-radius:8px; padding:6px; font-weight:600; font-size:0.8rem;">
-                    <option value="all">Ver Tudo</option>
-                    <option value="income">Só Entradas</option>
-                    <option value="expense">Só Saídas</option>
-                </select>
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:15px;">
+                <h3 style="margin:0;">Lançamentos</h3>
+                <div style="display:flex; gap:8px;">
+                    <input type="month" id="t-month" value="${currentMonth}" onchange="renderListView('${type}')" style="background:white; color:var(--text-main); border:1px solid #e2e8f0; border-radius:8px; padding:6px; font-weight:600; font-size:0.8rem; outline:none;">
+                    <select id="t-filter" onchange="renderListView('${type}')" style="background:white; color:var(--text-main); border:1px solid #e2e8f0; border-radius:8px; padding:6px; font-weight:600; font-size:0.8rem; outline:none;">
+                        <option value="all">Ver Tudo</option>
+                        <option value="income">Só Entradas</option>
+                        <option value="expense">Só Saídas</option>
+                    </select>
+                    ${currentUser.role === 'MASTER' ? `
+                        <select id="t-user" onchange="renderListView('${type}')" style="background:white; color:var(--text-main); border:1px solid #e2e8f0; border-radius:8px; padding:6px; font-weight:600; font-size:0.8rem; outline:none;">
+                            <option value="all">Todos Usuários</option>
+                            ${alasql("SELECT id, name FROM users").map(u => `<option value="${u.id}">${u.name}</option>`).join('')}
+                        </select>
+                    ` : ''}
+                </div>
             </div>
             <div id="list-${type}"></div>
         </div>
@@ -443,36 +488,32 @@ window.confirmSave = async (type, category, description, amount, date, method, o
 };
 
 
-async function fetchTransactions(type, month, filter = 'all') {
-    let data = [];
-    if (supabase) {
-        try {
-            let query = supabase.from('transactions').select('*').eq('type', type).eq('month_ref', month);
-            if (filter !== 'all') query = query.eq('category', filter);
-            if (currentUser.role !== 'MASTER') query = query.eq('user_id', currentUser.id);
-            const res = await query.order('date', { ascending: false }).order('id', { ascending: false });
-            if (res.data) data = res.data;
-        } catch (e) { console.error("Cloud Fetch Error:", e); }
+async function fetchTransactions(type, month, filter = 'all', userId = 'all') {
+    let sql = "SELECT * FROM transactions WHERE type=? AND month_ref=?";
+    const params = [type, month];
+    if (filter !== 'all') { sql += " AND category=?"; params.push(filter); }
+    
+    if (currentUser.role === 'MASTER') {
+        if (userId !== 'all') { sql += " AND user_id=?"; params.push(parseInt(userId)); }
+    } else {
+        sql += " AND user_id=?"; params.push(currentUser.id);
     }
     
-    // Fallback/Local merge
-    if (data.length === 0) {
-        let sql = "SELECT * FROM transactions WHERE type=? AND month_ref=?";
-        const params = [type, month];
-        if (filter !== 'all') { sql += " AND category=?"; params.push(filter); }
-        if (currentUser.role !== 'MASTER') { sql += " AND user_id=?"; params.push(currentUser.id); }
-        sql += " ORDER BY date DESC, id DESC";
-        data = alasql(sql, params);
-    }
-    return data;
+    sql += " ORDER BY date DESC, id DESC";
+    return alasql(sql, params);
 }
 
 
 async function renderListView(type) {
-    const filter = document.getElementById("t-filter").value;
-    const month = new Date().toISOString().slice(0, 7);
+    const filterInput = document.getElementById("t-filter");
+    const monthInput = document.getElementById("t-month");
+    const userInput = document.getElementById("t-user");
     
-    const data = await fetchTransactions(type, month, filter);
+    const filter = filterInput ? filterInput.value : 'all';
+    const month = monthInput ? monthInput.value : new Date().toISOString().slice(0, 7);
+    const userId = userInput ? userInput.value : 'all';
+    
+    const data = await fetchTransactions(type, month, filter, userId);
     const container = document.getElementById(`list-${type}`);
 
     container.innerHTML = "";
@@ -700,7 +741,8 @@ window.showInfo = () => {
                 <p style="color:var(--text-main); font-weight:500; font-size:0.9rem;">${online}</p>
             </div>
             <div style="margin-top:20px; border-top:1px solid #f1f5f9; padding-top:20px;">
-                <h4 style="color:var(--text-main); margin-bottom:12px; font-size:0.9rem;">Suporte Técnico</h4>
+                <h4 style="color:var(--text-main); margin-bottom:12px; font-size:0.9rem;">Gestão de Acessos</h4>
+                ${currentUser.role === 'MASTER' ? `<button class="btn-primary" onclick="showUserMgmt()" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-size:0.85rem; margin-bottom:10px;">👥 Gerenciar Usuários (Login/Senha)</button>` : ''}
                 <button class="btn-primary" onclick="forceMigration()" style="background:#fef2f2; color:#dc2626; border:1px solid #fee2e2; box-shadow:none; font-size:0.85rem;">🔧 Corrigir Erro (sync_id)</button>
             </div>
             <button class="btn-primary" onclick="hideModal()" style="margin-top:25px; font-weight:600;">Entendido</button>
@@ -737,11 +779,15 @@ window.showUserMgmt = () => {
     const users = alasql("SELECT * FROM users WHERE email != 'moises@'");
     let usersHtml = "";
     users.forEach(u => {
-        usersHtml += `<div class="glass-card" style="margin-bottom:5px; padding:10px; display:flex; justify-content:space-between; align-items:center;">
-            <div onclick="showUserMovs(${u.id})" style="cursor:pointer; flex:1;">
-                <strong>${u.name}</strong><br><small>${u.email}</small>
+        usersHtml += `<div class="glass-card" style="margin-bottom:8px; padding:15px; display:flex; justify-content:space-between; align-items:center; border:1px solid #f1f5f9;">
+            <div style="flex:1;">
+                <strong style="color:var(--text-main);">${u.name}</strong><br>
+                <small style="color:var(--text-dim);">Login: <b>${u.email}</b> | Senha: <b>${u.password}</b></small>
             </div>
-            <button onclick="deleteUser(${u.id})" style="background:none; border:none; color:red; font-size:1.2rem;">🗑️</button>
+            <div style="display:flex; gap:8px;">
+                <button onclick="editUser(${u.id})" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; width:34px; height:34px; cursor:pointer;" title="Editar">✏️</button>
+                <button onclick="deleteUser(${u.id})" style="background:#fff1f2; border:1px solid #fecaca; border-radius:8px; width:34px; height:34px; cursor:pointer;" title="Excluir">🗑️</button>
+            </div>
         </div>`;
     });
     showModal(`
@@ -749,9 +795,10 @@ window.showUserMgmt = () => {
             <h3 style="color:var(--text-main); font-size:1.2rem; margin-bottom:20px;">👥 Gestão de Usuários</h3>
             <div style="margin-bottom:25px;">${usersHtml || '<p style="text-align:center; color:var(--text-dim); font-size:0.9rem;">Nenhum usuário comum.</p>'}</div>
             
-            <div style="background:#f8fafc; padding:20px; border-radius:20px; border:1px solid #f1f5f9;">
-                <h4 style="color:var(--text-main); margin-bottom:15px; font-weight:700;">Novo Acesso</h4>
+            <div id="user-form-container" style="background:#f8fafc; padding:20px; border-radius:20px; border:1px solid #f1f5f9;">
+                <h4 id="user-form-title" style="color:var(--text-main); margin-bottom:15px; font-weight:700;">Novo Acesso</h4>
                 <form onsubmit="handleNewUser(event)">
+                    <input type="hidden" id="nu-id" value="">
                     <label style="font-size:0.8rem; color:var(--text-dim); font-weight:600;">Nome de Login</label>
                     <input type="text" id="nu-login" placeholder="Ex: joao_betel" required style="width:100%; margin-bottom:12px; padding:12px; border-radius:10px; background:white; border:1px solid #e2e8f0; color:var(--text-main); outline:none;">
                     
@@ -768,9 +815,9 @@ window.showUserMgmt = () => {
                     </select>
     
                     <label style="font-size:0.8rem; color:var(--text-dim); font-weight:600;">Senha</label>
-                    <input type="password" id="nu-pass" placeholder="••••••••" required style="width:100%; margin-bottom:15px; padding:12px; border-radius:10px; background:white; border:1px solid #e2e8f0; color:var(--text-main); outline:none;">
+                    <input type="text" id="nu-pass" placeholder="••••••••" required style="width:100%; margin-bottom:15px; padding:12px; border-radius:10px; background:white; border:1px solid #e2e8f0; color:var(--text-main); outline:none;">
                     
-                    <button type="submit" class="btn-primary" style="font-weight:700; background:var(--primary);">Criar Registro</button>
+                    <button type="submit" id="user-form-btn" class="btn-primary" style="font-weight:700; background:var(--primary);">Criar Registro</button>
                 </form>
             </div>
             <button class="btn-primary" onclick="hideModal()" style="margin-top:20px; background:none; color:var(--text-dim); box-shadow:none; font-weight:600;">Fechar Janela</button>
@@ -780,23 +827,49 @@ window.showUserMgmt = () => {
 
 window.handleNewUser = async (e) => {
     e.preventDefault();
+    const id = document.getElementById("nu-id").value;
     const login = document.getElementById("nu-login").value;
     const name = document.getElementById("nu-name").value;
     const pass = document.getElementById("nu-pass").value;
     
     if (!name) return alert("Por favor, selecione uma unidade.");
     
-    // Local
-    alasql("INSERT INTO users (email, password, name, role) VALUES (?,?,?,?)", [login, pass, name, 'COMMON']);
-    
-    // Cloud
-    if (supabase) {
-        try {
-            await supabase.from('users').insert([{ email: login, password: pass, name, role: 'COMMON' }]);
-        } catch (e) { console.error("Cloud User Save Error:", e); }
+    if (id) {
+        // Update Local
+        alasql("UPDATE users SET email=?, password=?, name=? WHERE id=?", [login, pass, name, parseInt(id)]);
+        // Update Cloud
+        if (supabase) {
+            try {
+                await supabase.from('users').update({ email: login, password: pass, name }).eq('email', login);
+            } catch (e) { console.error("Cloud User Update Error:", e); }
+        }
+    } else {
+        // Local
+        alasql("INSERT INTO users (email, password, name, role) VALUES (?,?,?,?)", [login, pass, name, 'COMMON']);
+        // Cloud
+        if (supabase) {
+            try {
+                await supabase.from('users').insert([{ email: login, password: pass, name, role: 'COMMON' }]);
+            } catch (e) { console.error("Cloud User Save Error:", e); }
+        }
     }
     
     showUserMgmt();
+};
+
+window.editUser = (id) => {
+    const u = alasql("SELECT * FROM users WHERE id=?", [id])[0];
+    if (u) {
+        document.getElementById("nu-id").value = u.id;
+        document.getElementById("nu-login").value = u.email;
+        document.getElementById("nu-name").value = u.name;
+        document.getElementById("nu-pass").value = u.password;
+        
+        document.getElementById("user-form-title").innerText = "Editar Usuário";
+        document.getElementById("user-form-btn").innerText = "Salvar Alterações";
+        document.getElementById("user-form-container").style.background = "#fffbeb";
+        document.getElementById("user-form-container").style.borderColor = "#fef3c7";
+    }
 };
 
 window.deleteUser = async (id) => {
@@ -958,8 +1031,15 @@ window.showConfig = () => {
                 <button class="btn-primary" onclick="testCloudConnection()" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:700; margin-bottom:10px;">⚡ Testar Conexão Agora</button>
                 <button class="btn-primary" onclick="saveCloudConfig()" style="background:#0284c7; color:white; border:none; font-weight:700;">Salvar e Reconectar</button>
                 <div style="height:10px;"></div>
+                <button class="btn-primary" onclick="generateInviteLink()" style="background:#f8fafc; color:#0369a1; border:1px solid #e2e8f0; box-shadow:none; font-weight:600; margin-bottom:10px;">🔗 Gerar Link de Convite</button>
                 <button class="btn-primary" onclick="syncAllToCloud()" style="background:white; color:#0284c7; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Push: Enviar dados deste PC p/ Nuvem</button>
                 <button class="btn-primary" onclick="manualPull()" style="margin-top:10px; background:white; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Pull: Buscar dados da Nuvem p/ este PC</button>
+            </div>
+
+            <div style="margin-top:30px; padding:20px; border:2px dashed #fecaca; border-radius:20px; background:#fff1f2;">
+                <h4 style="color:#991b1b; margin-bottom:10px; font-weight:800;">🛑 ZONA DE PERIGO</h4>
+                <p style="font-size:0.75rem; color:#991b1b; margin-bottom:15px; font-weight:500;">Esta ação irá apagar TODOS os dízimos, ofertas e usuários comuns do computador e da nuvem. Isso não pode ser desfeito.</p>
+                <button class="btn-primary" onclick="clearAllData()" style="background:#dc2626; color:white; border:none; font-weight:700; box-shadow:0 4px 12px rgba(220, 38, 38, 0.2);">LIMPAR TODOS OS DADOS (RESET)</button>
             </div>
             
             <button class="btn-primary" onclick="hideModal()" style="margin-top:25px; background:none; color:var(--text-dim); box-shadow:none; font-weight:600;">Sair das Configs</button>
@@ -997,6 +1077,23 @@ window.syncAllToCloud = async () => {
     }
 };
 
+
+window.generateInviteLink = () => {
+    if (!CLOUD_CONFIG.url || !CLOUD_CONFIG.key) {
+        return alert("Primeiro configure e salve os dados do Supabase.");
+    }
+    
+    const baseUrl = window.location.href.split('?')[0].split('#')[0];
+    const inviteUrl = `${baseUrl}?sb_url=${encodeURIComponent(CLOUD_CONFIG.url)}&sb_key=${encodeURIComponent(CLOUD_CONFIG.key)}`;
+    
+    // Copy to clipboard
+    navigator.clipboard.writeText(inviteUrl).then(() => {
+        alert("Link de Convite copiado!\n\nEnvie este link para os outros usuários. Quando eles clicarem, o celular deles será configurado automaticamente.");
+    }).catch(err => {
+        console.error("Clipboard Error:", err);
+        prompt("Copie este link e envie para os usuários:", inviteUrl);
+    });
+};
 
 window.saveCloudConfig = () => {
     let url = document.getElementById('cfg-sb-url').value.trim();
@@ -1049,6 +1146,9 @@ window.testCloudConnection = async () => {
 
 window.pullFromCloud = async () => {
     if (!supabase) return;
+    isSyncing = true;
+    if (currentUser) renderDashboard();
+    
     console.log("Pulling data from cloud...");
     try {
         // 1. Fetch Transactions
@@ -1086,12 +1186,40 @@ window.pullFromCloud = async () => {
         }
         
         console.log("Cloud Pull Completed.");
-        if (currentUser) renderDashboard();
+        isSyncing = false;
+        if (currentUser) {
+            renderDashboard();
+            const activeTab = document.querySelector(".nav-item.active")?.dataset.tab;
+            if (activeTab === 'tithes') renderListView('tithe');
+            if (activeTab === 'offerings') renderListView('offering');
+        }
         return true;
     } catch (e) {
         console.error("Cloud Pull Error:", e);
+        isSyncing = false;
+        if (currentUser) renderDashboard();
         return false;
     }
+};
+
+window.handleRealtimeChange = (payload) => {
+    const { eventType, new: newRow, old: oldRow } = payload;
+    
+    if (eventType === 'INSERT' || eventType === 'UPDATE') {
+        const row = newRow;
+        const exists = alasql("SELECT id FROM transactions WHERE sync_id=?", [row.sync_id])[0];
+        if (exists) {
+            alasql("UPDATE transactions SET type=?, category=?, description=?, amount=?, date=?, method=?, observation=?, user_id=?, user_name=?, month_ref=? WHERE sync_id=?",
+                [row.type, row.category, row.description, row.amount, row.date, row.method, row.observation, row.user_id, row.user_name, row.month_ref, row.sync_id]);
+        } else {
+            alasql("INSERT INTO transactions (type, category, description, amount, date, method, observation, user_id, user_name, month_ref, sync_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [row.type, row.category, row.description, row.amount, row.date, row.method, row.observation, row.user_id, row.user_name, row.month_ref, row.sync_id]);
+        }
+    } else if (eventType === 'DELETE') {
+        alasql("DELETE FROM transactions WHERE sync_id=?", [oldRow.sync_id]);
+    }
+    
+    if (currentUser) renderDashboard();
 };
 
 window.manualPull = async () => {
@@ -1103,6 +1231,39 @@ window.manualPull = async () => {
         alert("Erro ao buscar dados. Verifique sua conexão e se o Supabase está configurado corretamente.");
     }
 }
+
+window.clearAllData = async () => {
+    const confirm1 = confirm("⚠️ ATENÇÃO: Você está prestes a apagar TODOS os dados do sistema (Dízimos, Ofertas e Usuários Comuns).\n\nEsta ação não pode ser desfeita. Deseja continuar?");
+    if (!confirm1) return;
+
+    const confirm2 = confirm("CONFIRMAÇÃO FINAL: Tem certeza absoluta? Isso limpará também os dados na Nuvem.");
+    if (!confirm2) return;
+
+    try {
+        console.log("Starting System Reset...");
+        
+        // 1. Clear Local Database
+        alasql("DELETE FROM transactions");
+        alasql("DELETE FROM users WHERE email != 'moises@'");
+        
+        // 2. Clear Cloud Database
+        if (supabase) {
+            // Delete all transactions
+            const { error: tErr } = await supabase.from('transactions').delete().neq('id', 0); // Hack to delete all
+            if (tErr) console.error("Cloud Clear Transactions Error:", tErr);
+            
+            // Delete all common users
+            const { error: uErr } = await supabase.from('users').delete().neq('email', 'moises@');
+            if (uErr) console.error("Cloud Clear Users Error:", uErr);
+        }
+
+        alert("✅ Sistema limpo com sucesso! O aplicativo será reiniciado.");
+        location.reload();
+    } catch (e) {
+        console.error("Reset Error:", e);
+        alert("Erro durante a limpeza: " + e.message);
+    }
+};
 
 
 window.setTheme = (theme) => {
