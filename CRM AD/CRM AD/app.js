@@ -54,8 +54,32 @@ function initSupabase() {
 }
 
 // --- Initialization ---
+function handleUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('sb_url');
+    const key = params.get('sb_key');
+    
+    if (url && key) {
+        localStorage.setItem('sb_url', decodeURIComponent(url));
+        localStorage.setItem('sb_key', decodeURIComponent(key));
+        localStorage.setItem('sb_enabled', 'true');
+        
+        // Update CLOUD_CONFIG immediately
+        CLOUD_CONFIG.url = decodeURIComponent(url);
+        CLOUD_CONFIG.key = decodeURIComponent(key);
+        CLOUD_CONFIG.enabled = true;
+        
+        alert("Configuração automática do Supabase aplicada com sucesso!");
+        
+        // Clean URL without reloading
+        const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+        window.history.pushState({path:cleanUrl},'',cleanUrl);
+    }
+}
+
 async function initApp() {
     try {
+        handleUrlParams();
         console.log("Initializing Alasql...");
         
         // Setup Alasql Persistence
@@ -151,6 +175,7 @@ function setupGlobalEvents() {
                 USER_SESSIONS[currentUser.id] = { name: currentUser.name, lastActive: Date.now() };
                 showPage("main-container");
                 loadTab("dashboard");
+                alert("Bem Vindo ao ADFinança da Assembleia de Deus em Luis Domingues-MA");
             } else {
                 alert("Acesso Negado. Verifique o login e a senha.");
             }
@@ -379,6 +404,12 @@ function renderFinancialTab(type) {
                         <option value="income">Só Entradas</option>
                         <option value="expense">Só Saídas</option>
                     </select>
+                    ${currentUser.role === 'MASTER' ? `
+                        <select id="t-user" onchange="renderListView('${type}')" style="background:white; color:var(--text-main); border:1px solid #e2e8f0; border-radius:8px; padding:6px; font-weight:600; font-size:0.8rem; outline:none;">
+                            <option value="all">Todos Usuários</option>
+                            ${alasql("SELECT id, name FROM users").map(u => `<option value="${u.id}">${u.name}</option>`).join('')}
+                        </select>
+                    ` : ''}
                 </div>
             </div>
             <div id="list-${type}"></div>
@@ -457,11 +488,17 @@ window.confirmSave = async (type, category, description, amount, date, method, o
 };
 
 
-async function fetchTransactions(type, month, filter = 'all') {
+async function fetchTransactions(type, month, filter = 'all', userId = 'all') {
     let sql = "SELECT * FROM transactions WHERE type=? AND month_ref=?";
     const params = [type, month];
     if (filter !== 'all') { sql += " AND category=?"; params.push(filter); }
-    if (currentUser.role !== 'MASTER') { sql += " AND user_id=?"; params.push(currentUser.id); }
+    
+    if (currentUser.role === 'MASTER') {
+        if (userId !== 'all') { sql += " AND user_id=?"; params.push(parseInt(userId)); }
+    } else {
+        sql += " AND user_id=?"; params.push(currentUser.id);
+    }
+    
     sql += " ORDER BY date DESC, id DESC";
     return alasql(sql, params);
 }
@@ -470,11 +507,13 @@ async function fetchTransactions(type, month, filter = 'all') {
 async function renderListView(type) {
     const filterInput = document.getElementById("t-filter");
     const monthInput = document.getElementById("t-month");
+    const userInput = document.getElementById("t-user");
     
     const filter = filterInput ? filterInput.value : 'all';
     const month = monthInput ? monthInput.value : new Date().toISOString().slice(0, 7);
+    const userId = userInput ? userInput.value : 'all';
     
-    const data = await fetchTransactions(type, month, filter);
+    const data = await fetchTransactions(type, month, filter, userId);
     const container = document.getElementById(`list-${type}`);
 
     container.innerHTML = "";
@@ -992,6 +1031,7 @@ window.showConfig = () => {
                 <button class="btn-primary" onclick="testCloudConnection()" style="background:#f0f9ff; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:700; margin-bottom:10px;">⚡ Testar Conexão Agora</button>
                 <button class="btn-primary" onclick="saveCloudConfig()" style="background:#0284c7; color:white; border:none; font-weight:700;">Salvar e Reconectar</button>
                 <div style="height:10px;"></div>
+                <button class="btn-primary" onclick="generateInviteLink()" style="background:#f8fafc; color:#0369a1; border:1px solid #e2e8f0; box-shadow:none; font-weight:600; margin-bottom:10px;">🔗 Gerar Link de Convite</button>
                 <button class="btn-primary" onclick="syncAllToCloud()" style="background:white; color:#0284c7; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Push: Enviar dados deste PC p/ Nuvem</button>
                 <button class="btn-primary" onclick="manualPull()" style="margin-top:10px; background:white; color:#0369a1; border:1px solid #bae6fd; box-shadow:none; font-weight:600;">Pull: Buscar dados da Nuvem p/ este PC</button>
             </div>
@@ -1037,6 +1077,23 @@ window.syncAllToCloud = async () => {
     }
 };
 
+
+window.generateInviteLink = () => {
+    if (!CLOUD_CONFIG.url || !CLOUD_CONFIG.key) {
+        return alert("Primeiro configure e salve os dados do Supabase.");
+    }
+    
+    const baseUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+    const inviteUrl = `${baseUrl}?sb_url=${encodeURIComponent(CLOUD_CONFIG.url)}&sb_key=${encodeURIComponent(CLOUD_CONFIG.key)}`;
+    
+    // Copy to clipboard
+    navigator.clipboard.writeText(inviteUrl).then(() => {
+        alert("Link de Convite copiado!\n\nEnvie este link para os outros usuários. Quando eles clicarem, o celular deles será configurado automaticamente.");
+    }).catch(err => {
+        console.error("Clipboard Error:", err);
+        prompt("Copie este link e envie para os usuários:", inviteUrl);
+    });
+};
 
 window.saveCloudConfig = () => {
     let url = document.getElementById('cfg-sb-url').value.trim();
