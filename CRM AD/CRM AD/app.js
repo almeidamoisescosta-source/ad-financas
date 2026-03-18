@@ -60,19 +60,19 @@ function handleUrlParams() {
     const key = params.get('sb_key');
     
     if (url && key) {
-        localStorage.setItem('sb_url', decodeURIComponent(url));
-        localStorage.setItem('sb_key', decodeURIComponent(key));
+        localStorage.setItem('sb_url', url);
+        localStorage.setItem('sb_key', key);
         localStorage.setItem('sb_enabled', 'true');
         
         // Update CLOUD_CONFIG immediately
-        CLOUD_CONFIG.url = decodeURIComponent(url);
-        CLOUD_CONFIG.key = decodeURIComponent(key);
+        CLOUD_CONFIG.url = url;
+        CLOUD_CONFIG.key = key;
         CLOUD_CONFIG.enabled = true;
         
         alert("Configuração automática do Supabase aplicada com sucesso!");
         
         // Clean URL without reloading
-        const cleanUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+        const cleanUrl = window.location.href.split('?')[0].split('#')[0];
         window.history.pushState({path:cleanUrl},'',cleanUrl);
     }
 }
@@ -1083,7 +1083,7 @@ window.generateInviteLink = () => {
         return alert("Primeiro configure e salve os dados do Supabase.");
     }
     
-    const baseUrl = window.location.protocol + "//" + window.location.host + window.location.pathname;
+    const baseUrl = window.location.href.split('?')[0].split('#')[0];
     const inviteUrl = `${baseUrl}?sb_url=${encodeURIComponent(CLOUD_CONFIG.url)}&sb_key=${encodeURIComponent(CLOUD_CONFIG.key)}`;
     
     // Copy to clipboard
