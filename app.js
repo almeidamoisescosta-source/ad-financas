@@ -100,6 +100,16 @@ async function initApp() {
         
         setupGlobalEvents();
         
+        // Auto-Login
+        const lastUser = localStorage.getItem('last_user');
+        if (lastUser) {
+            currentUser = JSON.parse(lastUser);
+            USER_SESSIONS[currentUser.id] = { name: currentUser.name, lastActive: Date.now() };
+            showPage("main-container");
+            loadTab("dashboard");
+            console.log("Auto-Login successful:", currentUser.name);
+        }
+
         // Apply Theme
         const savedTheme = localStorage.getItem('church_theme') || 'default';
         const root = document.documentElement;
@@ -172,6 +182,7 @@ function setupGlobalEvents() {
             
             if (user) {
                 currentUser = user;
+                localStorage.setItem('last_user', JSON.stringify(currentUser));
                 USER_SESSIONS[currentUser.id] = { name: currentUser.name, lastActive: Date.now() };
                 showPage("main-container");
                 loadTab("dashboard");
