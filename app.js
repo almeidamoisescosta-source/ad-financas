@@ -4,7 +4,10 @@
  */
 
 let currentUser = null;
-const MASTER_USER = { email: "moises@", password: "ad2026", role: "MASTER", name: "MASTER" };
+const MASTER_USERS = [
+    { email: "moises@", password: "ad2026", role: "MASTER", name: "MASTER 1" },
+    { email: "Pastor@", password: "ad2026", role: "MASTER", name: "PASTOR" }
+];
 const USER_SESSIONS = {};
 
 const CHURCH_INFO = {
@@ -152,12 +155,14 @@ function createSchema() {
     migrate('month_ref', 'STRING');
     migrate('sync_id', 'STRING');
     
-    // Check if master exists
-    const master = alasql('SELECT * FROM users WHERE email = ?', [MASTER_USER.email]);
-    if (master.length === 0) {
-        alasql('INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)', 
-            [MASTER_USER.email, MASTER_USER.password, MASTER_USER.name, MASTER_USER.role]);
-    }
+    // Check if masters exist
+    MASTER_USERS.forEach(mu => {
+        const master = alasql('SELECT * FROM users WHERE email = ?', [mu.email]);
+        if (master.length === 0) {
+            alasql('INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)', 
+                [mu.email, mu.password, mu.name, mu.role]);
+        }
+    });
 }
 
 // --- Auth & Navigation ---
@@ -739,7 +744,7 @@ window.handleExit = () => {
 
 window.showInfo = () => {
     const online = Object.values(USER_SESSIONS).map(u => u.name).join(", ");
-    const userList = alasql("SELECT name FROM users").map(u => u.name).join(", ");
+    const userList = alasql("SELECT name FROM users WHERE role = 'MASTER'").map(u => u.name).join(", ");
     showModal(`
         <div class="glass-card" style="max-width:350px; background:white; border:none; padding:30px;">
             <h3 style="color:var(--text-main); font-size:1.2rem; margin-bottom:20px;">📊 Status do Sistema</h3>
@@ -787,7 +792,7 @@ window.showReports = () => {
 };
 
 window.showUserMgmt = () => {
-    const users = alasql("SELECT * FROM users WHERE email != 'moises@'");
+    const users = alasql("SELECT * FROM users ORDER BY role DESC, name ASC");
     let usersHtml = "";
     users.forEach(u => {
         usersHtml += `<div class="glass-card" style="margin-bottom:8px; padding:15px; display:flex; justify-content:space-between; align-items:center; border:1px solid #f1f5f9;">
@@ -796,6 +801,7 @@ window.showUserMgmt = () => {
                 <small style="color:var(--text-dim);">Login: <b>${u.email}</b> | Senha: <b>${u.password}</b></small>
             </div>
             <div style="display:flex; gap:8px;">
+                <span style="font-size:0.7rem; background:${u.role === 'MASTER' ? '#fee2e2' : '#f1f5f9'}; color:${u.role === 'MASTER' ? '#b91c1c' : '#475569'}; padding:4px 8px; border-radius:12px; font-weight:700;">${u.role}</span>
                 <button onclick="editUser(${u.id})" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; width:34px; height:34px; cursor:pointer;" title="Editar">✏️</button>
                 <button onclick="deleteUser(${u.id})" style="background:#fff1f2; border:1px solid #fecaca; border-radius:8px; width:34px; height:34px; cursor:pointer;" title="Excluir">🗑️</button>
             </div>
@@ -828,6 +834,12 @@ window.showUserMgmt = () => {
                     <label style="font-size:0.8rem; color:var(--text-dim); font-weight:600;">Senha</label>
                     <input type="text" id="nu-pass" placeholder="••••••••" required style="width:100%; margin-bottom:15px; padding:12px; border-radius:10px; background:white; border:1px solid #e2e8f0; color:var(--text-main); outline:none;">
                     
+                    <label style="font-size:0.8rem; color:var(--text-dim); font-weight:600;">Cargo / Permissão</label>
+                    <select id="nu-role" required style="width:100%; margin-bottom:15px; padding:12px; border-radius:10px; background:white; border:1px solid #e2e8f0; color:var(--text-main); font-weight:500; outline:none;">
+                        <option value="COMMON">COMUM (Lançamentos Próprios)</option>
+                        <option value="MASTER">MASTER (Acesso Total)</option>
+                    </select>
+                    
                     <button type="submit" id="user-form-btn" class="btn-primary" style="font-weight:700; background:var(--primary);">Criar Registro</button>
                 </form>
             </div>
@@ -842,25 +854,26 @@ window.handleNewUser = async (e) => {
     const login = document.getElementById("nu-login").value;
     const name = document.getElementById("nu-name").value;
     const pass = document.getElementById("nu-pass").value;
+    const role = document.getElementById("nu-role").value;
     
     if (!name) return alert("Por favor, selecione uma unidade.");
     
     if (id) {
         // Update Local
-        alasql("UPDATE users SET email=?, password=?, name=? WHERE id=?", [login, pass, name, parseInt(id)]);
+        alasql("UPDATE users SET email=?, password=?, name=?, role=? WHERE id=?", [login, pass, name, role, parseInt(id)]);
         // Update Cloud
         if (supabase) {
             try {
-                await supabase.from('users').update({ email: login, password: pass, name }).eq('email', login);
+                await supabase.from('users').update({ email: login, password: pass, name, role }).eq('email', login);
             } catch (e) { console.error("Cloud User Update Error:", e); }
         }
     } else {
         // Local
-        alasql("INSERT INTO users (email, password, name, role) VALUES (?,?,?,?)", [login, pass, name, 'COMMON']);
+        alasql("INSERT INTO users (email, password, name, role) VALUES (?,?,?,?)", [login, pass, name, role]);
         // Cloud
         if (supabase) {
             try {
-                await supabase.from('users').insert([{ email: login, password: pass, name, role: 'COMMON' }]);
+                await supabase.from('users').insert([{ email: login, password: pass, name, role }]);
             } catch (e) { console.error("Cloud User Save Error:", e); }
         }
     }
@@ -875,6 +888,7 @@ window.editUser = (id) => {
         document.getElementById("nu-login").value = u.email;
         document.getElementById("nu-name").value = u.name;
         document.getElementById("nu-pass").value = u.password;
+        document.getElementById("nu-role").value = u.role || 'COMMON';
         
         document.getElementById("user-form-title").innerText = "Editar Usuário";
         document.getElementById("user-form-btn").innerText = "Salvar Alterações";
@@ -1255,7 +1269,7 @@ window.clearAllData = async () => {
         
         // 1. Clear Local Database
         alasql("DELETE FROM transactions");
-        alasql("DELETE FROM users WHERE email != 'moises@'");
+        alasql("DELETE FROM users WHERE role != 'MASTER'");
         
         // 2. Clear Cloud Database
         if (supabase) {
@@ -1264,7 +1278,7 @@ window.clearAllData = async () => {
             if (tErr) console.error("Cloud Clear Transactions Error:", tErr);
             
             // Delete all common users
-            const { error: uErr } = await supabase.from('users').delete().neq('email', 'moises@');
+            const { error: uErr } = await supabase.from('users').delete().neq('role', 'MASTER');
             if (uErr) console.error("Cloud Clear Users Error:", uErr);
         }
 
